@@ -2,6 +2,7 @@
   "journey": {
     "departureStation": "",
     "destinationStation": null,
+    "outOfHoursName": "South Milford",
     "stationAbbr": {
       "International": "Intl."
     }
@@ -12,10 +13,15 @@
     "apiKey": "",
     "operatingHours": "0-23"
   },
-  "rttApi":{
-      "username": "",
-      "password": "",
-      "operatingHours": "6-23"
-    },
-    "apiMethod": "rtt"    
+  "rttApi": {
+    "username": "",
+    "password": "",
+    "operatingHours": "6-23"
+  },
+  "describrr": {
+    "tiploc": "",
+    "host": "http://localhost:8080",
+    "operatingHours": "6-23"
+  },
+  "apiMethod": "rtt"
 }

@@ -2,13 +2,17 @@ import os
 import sys
 import time
 import json
+import queue
 
 from datetime import timedelta
 from timeloop import Timeloop
 from datetime import datetime
 from PIL import ImageFont, Image
 from helpers import get_device
-from trains import loadDeparturesForStation, loadDestinationsForDeparture, loadDeparturesForStationRTT, loadDestinationsForDepartureRTT
+from trains import (loadDeparturesForStation, loadDestinationsForDeparture,
+                    loadDeparturesForStationRTT, loadDestinationsForDepartureRTT,
+                    loadServicesForStationDescribrr, loadDestinationsForServiceDescribrr,
+                    startLivePassListener)
 from luma.core.render import canvas
 from luma.core.virtual import viewport, snapshot
 from open import isRun
@@ -61,8 +65,10 @@ def renderPlatform(departure):
     def drawText(draw, width, height):
         if departure["mode"] == "bus":
             draw.text((0, 0), text="BUS", font=font, fill="yellow")
+        elif departure["mode"] == "pass":
+            draw.text((0, 0), text="PASS", font=font, fill="yellow")
         else:
-            if isinstance(departure["platform"], str):
+            if isinstance(departure["platform"], str) and departure["platform"]:
                 draw.text((0, 0), text="Plat "+departure["platform"], font=font, fill="yellow")
     return drawText
 
@@ -156,6 +162,64 @@ def loadDataRTT(apiConfig, journeyConfig):
 
     #return False, False, journeyConfig['outOfHoursName']
     return departures, firstDepartureDestinations, stationName
+
+def loadDataDescribrr(apiConfig, journeyConfig):
+    runHours = [int(x) for x in apiConfig['operatingHours'].split('-')]
+    if isRun(runHours[0], runHours[1]) == False:
+        return False, False, journeyConfig['outOfHoursName']
+
+    departures, station_name = loadServicesForStationDescribrr(journeyConfig, apiConfig)
+
+    if not departures:
+        return False, False, station_name or journeyConfig['outOfHoursName']
+
+    for dep in departures[:5]:
+        try:
+            calling_at, dest_name = loadDestinationsForServiceDescribrr(journeyConfig, apiConfig, dep['rid'])
+            dep['destination_name'] = dest_name
+            dep['_calling_at'] = calling_at
+        except Exception:
+            dep['destination_name'] = dep.get('destination_name', '')
+            dep['_calling_at'] = []
+
+    first_calling_at = departures[0].get('_calling_at', [])
+    return departures, first_calling_at, station_name
+
+
+livePassOffset = 0
+livePassLaps = 0
+
+
+def renderLivePassText(message):
+    def drawText(draw, width, height):
+        global livePassOffset, livePassLaps
+        padded = message + "     "
+        if livePassOffset >= len(padded):
+            livePassOffset = 0
+            livePassLaps += 1
+        draw.text((0, 0), text=padded[livePassOffset:], font=fontBoldLarge, fill="yellow")
+        livePassOffset += 1
+    return drawText
+
+
+def drawLivePassSignage(device, width, height, message):
+    global livePassOffset, livePassLaps
+    device.clear()
+
+    virtualViewport = viewport(device, width=width, height=height)
+
+    rowScroll = snapshot(width, 20, renderLivePassText(message), interval=0.1)
+    rowTime = snapshot(width, 14, renderTime, interval=1)
+
+    if len(virtualViewport._hotspots) > 0:
+        for hotspot, xy in virtualViewport._hotspots:
+            virtualViewport.remove_hotspot(hotspot, xy)
+
+    virtualViewport.add_hotspot(rowScroll, (0, 15))
+    virtualViewport.add_hotspot(rowTime, (0, 50))
+
+    return virtualViewport
+
 
 def drawBlankSignage(device, width, height, departureStation):
     global stationRenderCount, pauseCount
@@ -277,10 +341,16 @@ try:
     pauseCount = 0
     loop_count = 0
 
-    if config["apiMethod"] == 'rtt':
+    live_pass_queue = queue.Queue()
+    live_pass_active = False
+
+    if config["apiMethod"] == 'describrr':
+        data = loadDataDescribrr(config["describrr"], config["journey"])
+        startLivePassListener(config["journey"], config["describrr"], live_pass_queue)
+    elif config["apiMethod"] == 'rtt':
         data = loadDataRTT(config["rttApi"], config["journey"])
     else:
-        data = loadData(config["transportApi"], config["journey"])      
+        data = loadData(config["transportApi"], config["journey"])
 
     if data[0] == False:
         virtual = drawBlankSignage(
@@ -293,20 +363,50 @@ try:
     timeNow = time.time()
 
     while True:
-        if(timeNow - timeAtStart >= config["refreshTime"]):
-            if config["apiMethod"] == 'rtt':
-                data = loadDataRTT(config["rttApi"], config["journey"])
-            else:
-                data = loadData(config["transportApi"], config["journey"])      
-                
-            if data[0] == False:
-                virtual = drawBlankSignage(
-                    device, width=widgetWidth, height=widgetHeight, departureStation=data[2])
-            else:
-                virtual = drawSignage(device, width=widgetWidth,
-                                      height=widgetHeight, data=data)
+        # Check for a live pass event from the WebSocket listener
+        if config["apiMethod"] == 'describrr':
+            try:
+                pass_data = live_pass_queue.get_nowait()
+                livePassOffset = 0
+                livePassLaps = 0
+                calling_str = ', '.join(pass_data['calling_at']) if pass_data['calling_at'] else ''
+                live_pass_message = (
+                    f"LIVE PASS  {pass_data['headcode']}  {pass_data['uid']}  "
+                    f"{pass_data['origin']} to {pass_data['destination']}"
+                    + (f"  Calling: {calling_str}" if calling_str else "")
+                )
+                virtual = drawLivePassSignage(
+                    device, width=widgetWidth, height=widgetHeight, message=live_pass_message)
+                live_pass_active = True
+            except queue.Empty:
+                pass
 
-            timeAtStart = time.time()
+        if live_pass_active:
+            if livePassLaps >= 2:
+                live_pass_active = False
+                if data[0] == False:
+                    virtual = drawBlankSignage(
+                        device, width=widgetWidth, height=widgetHeight, departureStation=data[2])
+                else:
+                    virtual = drawSignage(device, width=widgetWidth,
+                                          height=widgetHeight, data=data)
+        else:
+            if(timeNow - timeAtStart >= config["refreshTime"]):
+                if config["apiMethod"] == 'describrr':
+                    data = loadDataDescribrr(config["describrr"], config["journey"])
+                elif config["apiMethod"] == 'rtt':
+                    data = loadDataRTT(config["rttApi"], config["journey"])
+                else:
+                    data = loadData(config["transportApi"], config["journey"])
+
+                if data[0] == False:
+                    virtual = drawBlankSignage(
+                        device, width=widgetWidth, height=widgetHeight, departureStation=data[2])
+                else:
+                    virtual = drawSignage(device, width=widgetWidth,
+                                          height=widgetHeight, data=data)
+
+                timeAtStart = time.time()
 
         timeNow = time.time()
         virtual.refresh()
