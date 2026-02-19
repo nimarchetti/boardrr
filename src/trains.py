@@ -1,7 +1,14 @@
 import os
 import requests
 import json
+import threading
+import time as time_module
 from datetime import date
+
+try:
+    import websocket
+except ImportError:
+    websocket = None
 
 def abbrStation(journeyConfig, inputStr):
     dict = journeyConfig['stationAbbr']
@@ -133,4 +140,174 @@ def loadDestinationsForDeparture(journeyConfig, timetableUrl):
         departureDestinationList[0] = departureDestinationList[0] + ' only.'
 
     return departureDestinationList
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Describrr API functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pick_time(primary, *fallbacks):
+    """Return the first non-None time string sliced to HH:MM."""
+    for t in (primary,) + fallbacks:
+        if t:
+            return t[:5]
+    return None
+
+
+def loadServicesForStationDescribrr(journeyConfig, apiConfig):
+    tiploc = apiConfig['tiploc']
+    host = apiConfig['host'].rstrip('/')
+    params = {
+        'direction': 'all',
+        'from': 'now',
+        'to': 'now+2h',
+        'limit': 5,
+    }
+    r = requests.get(f"{host}/v1/boards/{tiploc}", params=params, timeout=10)
+    data = r.json()
+    station_name = data.get('name') or tiploc
+
+    departures = []
+    for e in data.get('entries', []):
+        if e.get('status') in ('arrived', 'departed', 'passed'):
+            continue
+
+        event_type = e.get('event_type', 'DEP')
+
+        if event_type == 'PASS':
+            wt = _pick_time(e.get('wtp'), e.get('wta'), e.get('wtd'))
+            et = _pick_time(e.get('etp'), e.get('eta'), e.get('etd'),
+                            e.get('atp'), e.get('ata'), e.get('atd'), wt)
+        elif event_type == 'ARR':
+            wt = _pick_time(e.get('wta'), e.get('wtd'), e.get('wtp'))
+            et = _pick_time(e.get('eta'), e.get('ata'),
+                            e.get('etd'), e.get('atd'),
+                            e.get('etp'), e.get('atp'), wt)
+        else:  # DEP
+            wt = _pick_time(e.get('wtd'), e.get('wta'), e.get('wtp'))
+            et = _pick_time(e.get('etd'), e.get('atd'),
+                            e.get('eta'), e.get('ata'),
+                            e.get('etp'), e.get('atp'), wt)
+
+        if wt is None:
+            continue
+
+        status = 'CANCELLED' if e.get('cancelled') else e.get('status', 'scheduled')
+
+        departures.append({
+            'rid': e['rid'],
+            'destination_name': '',
+            'aimed_departure_time': wt,
+            'expected_departure_time': et or wt,
+            'status': status,
+            'mode': 'pass' if event_type == 'PASS' else 'train',
+            'platform': e.get('platform') or '',
+            'event_type': event_type,
+        })
+
+    return departures, station_name
+
+
+def loadDestinationsForServiceDescribrr(journeyConfig, apiConfig, rid):
+    host = apiConfig['host'].rstrip('/')
+    board_tiploc = apiConfig['tiploc']
+    r = requests.get(f"{host}/v1/services/{rid}", timeout=10)
+    data = r.json()
+
+    stops = data.get('stops', [])
+    if not stops:
+        return [], ''
+
+    dest_name = abbrStation(journeyConfig, stops[-1].get('name') or stops[-1]['tiploc'])
+
+    board_idx = -1
+    for i, s in enumerate(stops):
+        if s['tiploc'] == board_tiploc:
+            board_idx = i
+            break
+
+    calling_at = []
+    for s in stops[board_idx + 1:]:
+        calling_at.append(abbrStation(journeyConfig, s.get('name') or s['tiploc']))
+
+    if len(calling_at) == 1:
+        calling_at[0] += ' only.'
+
+    return calling_at, dest_name
+
+
+def startLivePassListener(journeyConfig, apiConfig, event_queue):
+    if websocket is None:
+        return
+
+    host = apiConfig['host'].rstrip('/')
+    tiploc = apiConfig['tiploc']
+    ws_url = host.replace('https://', 'wss://').replace('http://', 'ws://') + f"/v1/ws/boards/{tiploc}"
+
+    _seen_rids = {}  # rid -> float timestamp
+
+    def _fetch_pass_data(rid):
+        try:
+            r = requests.get(f"{host}/v1/services/{rid}", timeout=10)
+            data = r.json()
+            stops = data.get('stops', [])
+            headcode = data.get('headcode', '????')
+            uid = data.get('uid') or ''
+            origin = abbrStation(journeyConfig, stops[0].get('name') or stops[0]['tiploc']) if stops else ''
+            dest = abbrStation(journeyConfig, stops[-1].get('name') or stops[-1]['tiploc']) if stops else ''
+            calling = [abbrStation(journeyConfig, s.get('name') or s['tiploc']) for s in stops]
+            return {
+                'rid': rid,
+                'headcode': headcode,
+                'uid': uid,
+                'origin': origin,
+                'destination': dest,
+                'calling_at': calling,
+            }
+        except Exception:
+            return None
+
+    def on_message(ws, message):
+        try:
+            msg = json.loads(message)
+        except Exception:
+            return
+
+        if msg.get('type') == 'ping':
+            ws.send(json.dumps({'type': 'pong'}))
+            return
+
+        if msg.get('type') == 'timing':
+            d = msg.get('data', {})
+            if d.get('event_type') == 'PASS' and d.get('at'):
+                rid = d.get('rid', '')
+                if not rid:
+                    return
+
+                now = time_module.time()
+                cutoff = now - 300
+                for old_rid in [k for k, v in list(_seen_rids.items()) if v < cutoff]:
+                    del _seen_rids[old_rid]
+
+                if rid in _seen_rids:
+                    return
+                _seen_rids[rid] = now
+
+                pass_data = _fetch_pass_data(rid)
+                if pass_data:
+                    event_queue.put(pass_data)
+
+    def run():
+        backoff = 2
+        while True:
+            try:
+                ws = websocket.WebSocketApp(ws_url, on_message=on_message)
+                ws.run_forever(ping_interval=25, ping_timeout=30)
+            except Exception:
+                pass
+            time_module.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
 
