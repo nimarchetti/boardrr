@@ -1,7 +1,7 @@
 luma.core
 luma.oled
 luma.emulator
-Pillow>=9.0,<10
+Pillow>=10.0
 requests
 websocket-client
 RPi.GPIO

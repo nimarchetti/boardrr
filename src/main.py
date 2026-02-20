@@ -31,6 +31,11 @@ def makeFont(name, size):
     return ImageFont.truetype(font_path, size)
 
 
+def _textsize(text, font):
+    bbox = font.getbbox(text)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
 def renderDestination(departure, font):
     departureTime = departure["aimed_departure_time"]
     destinationName = departure["destination_name"]
@@ -55,7 +60,7 @@ def renderServiceStatus(departure):
             if departure["aimed_departure_time"] == departure["expected_departure_time"]:
                 train = "On time"
 
-        w, h = draw.textsize(train, font)
+        w, h = _textsize(train, font)
         draw.text((width-w,0), text=train, font=font, fill="yellow")
     return drawText
 
@@ -98,8 +103,8 @@ def renderTime(draw, width, height):
     rawTime = datetime.now().time()
     hour, minute, second = str(rawTime).split('.')[0].split(':')
 
-    w1, h1 = draw.textsize("{}:{}".format(hour, minute), fontBoldLarge)
-    w2, h2 = draw.textsize(":00", fontBoldTall)
+    w1, h1 = _textsize("{}:{}".format(hour, minute), fontBoldLarge)
+    w2, h2 = _textsize(":00", fontBoldTall)
 
     draw.text(((width - w1 - w2) / 2, 0), text="{}:{}".format(hour, minute),
               font=fontBoldLarge, fill="yellow")
@@ -222,11 +227,8 @@ def drawLivePassSignage(device, width, height, message):
 def drawBlankSignage(device, width, height, departureStation):
     global stationRenderCount, pauseCount
 
-    with canvas(device) as draw:
-        welcomeSize = draw.textsize("Welcome to", fontBold)
-
-    with canvas(device) as draw:
-        stationSize = draw.textsize(departureStation, fontBold)
+    welcomeSize = _textsize("Welcome to", fontBold)
+    stationSize = _textsize(departureStation, fontBold)
 
     device.clear()
 
@@ -263,16 +265,12 @@ def drawSignage(device, width, height, data):
 
     departures, firstDepartureDestinations, departureStation = data
 
-    with canvas(device) as draw:
-        w, h = draw.textsize(callingAt, font)
-
+    w, h = _textsize(callingAt, font)
     callingWidth = w
     width = virtualViewport.width
 
-    # First measure the text size
-    with canvas(device) as draw:
-        w, h = draw.textsize(status, font)
-        pw, ph = draw.textsize("Plat 88", font)
+    w, h = _textsize(status, font)
+    pw, ph = _textsize("Plat 88", font)
 
     rowOneA = snapshot(
         width - w - pw, 10, renderDestination(departures[0], fontBold), interval=10)
