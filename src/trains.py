@@ -1,9 +1,12 @@
 import os
+import logging
 import requests
 import json
 import threading
 import time as time_module
 from datetime import date
+
+logger = logging.getLogger(__name__)
 
 try:
     import websocket
@@ -11,6 +14,7 @@ except ImportError:
     websocket = None
 
 def abbrStation(journeyConfig, inputStr):
+    inputStr = inputStr.title()
     dict = journeyConfig['stationAbbr']
     for key in dict.keys():
         inputStr = inputStr.replace(key, dict[key])
@@ -203,6 +207,8 @@ def loadServicesForStationDescribrr(journeyConfig, apiConfig):
             'mode': 'pass' if event_type == 'PASS' else 'train',
             'platform': e.get('platform') or '',
             'event_type': event_type,
+            'ata': e.get('ata'),
+            'atd': e.get('atd'),
         })
 
     return departures, station_name
@@ -218,7 +224,23 @@ def loadDestinationsForServiceDescribrr(journeyConfig, apiConfig, rid):
     if not stops:
         return [], ''
 
-    dest_name = abbrStation(journeyConfig, stops[-1].get('name') or stops[-1]['tiploc'])
+    # Use the service's declared destination TIPLOC to find the destination name.
+    # stops[-1] is unreliable because synthetic TD position reports (name=None)
+    # are appended after the real final timetable stop.
+    dest_tiploc = data.get('destination')
+    dest_name = ''
+    if dest_tiploc:
+        for s in stops:
+            if s['tiploc'] == dest_tiploc and s.get('name'):
+                dest_name = abbrStation(journeyConfig, s['name'])
+                break
+    if not dest_name:
+        for s in reversed(stops):
+            if s.get('name'):
+                dest_name = abbrStation(journeyConfig, s['name'])
+                break
+    if not dest_name:
+        dest_name = abbrStation(journeyConfig, dest_tiploc or stops[-1]['tiploc'])
 
     board_idx = -1
     for i, s in enumerate(stops):
@@ -228,7 +250,8 @@ def loadDestinationsForServiceDescribrr(journeyConfig, apiConfig, rid):
 
     calling_at = []
     for s in stops[board_idx + 1:]:
-        calling_at.append(abbrStation(journeyConfig, s.get('name') or s['tiploc']))
+        if s.get('name'):
+            calling_at.append(abbrStation(journeyConfig, s['name']))
 
     if len(calling_at) == 1:
         calling_at[0] += ' only.'
@@ -238,11 +261,14 @@ def loadDestinationsForServiceDescribrr(journeyConfig, apiConfig, rid):
 
 def startLivePassListener(journeyConfig, apiConfig, event_queue):
     if websocket is None:
+        logger.warning("websocket-client not installed — live pass listener disabled")
         return
 
     host = apiConfig['host'].rstrip('/')
     tiploc = apiConfig['tiploc']
     ws_url = host.replace('https://', 'wss://').replace('http://', 'ws://') + f"/v1/ws/boards/{tiploc}"
+
+    logger.info("Live pass listener starting — connecting to %s", ws_url)
 
     _seen_rids = {}  # rid -> float timestamp
 
@@ -254,8 +280,19 @@ def startLivePassListener(journeyConfig, apiConfig, event_queue):
             headcode = data.get('headcode', '????')
             uid = data.get('uid') or ''
             origin = abbrStation(journeyConfig, stops[0].get('name') or stops[0]['tiploc']) if stops else ''
-            dest = abbrStation(journeyConfig, stops[-1].get('name') or stops[-1]['tiploc']) if stops else ''
-            calling = [abbrStation(journeyConfig, s.get('name') or s['tiploc']) for s in stops]
+            dest_tiploc = data.get('destination')
+            dest = ''
+            if dest_tiploc:
+                for s in stops:
+                    if s['tiploc'] == dest_tiploc and s.get('name'):
+                        dest = abbrStation(journeyConfig, s['name'])
+                        break
+            if not dest:
+                for s in reversed(stops):
+                    if s.get('name'):
+                        dest = abbrStation(journeyConfig, s['name'])
+                        break
+            calling = [abbrStation(journeyConfig, s['name']) for s in stops if s.get('name')]
             return {
                 'rid': rid,
                 'headcode': headcode,
@@ -264,24 +301,37 @@ def startLivePassListener(journeyConfig, apiConfig, event_queue):
                 'destination': dest,
                 'calling_at': calling,
             }
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to fetch service data for RID %s: %s", rid, e)
             return None
+
+    def on_open(ws):
+        logger.info("Live pass WebSocket connected to %s", ws_url)
 
     def on_message(ws, message):
         try:
             msg = json.loads(message)
-        except Exception:
+        except Exception as e:
+            logger.debug("Failed to parse WebSocket message: %s", e)
             return
 
-        if msg.get('type') == 'ping':
+        msg_type = msg.get('type')
+        logger.debug("WebSocket message received: type=%s", msg_type)
+
+        if msg_type == 'ping':
             ws.send(json.dumps({'type': 'pong'}))
             return
 
-        if msg.get('type') == 'timing':
+        if msg_type == 'timing':
             d = msg.get('data', {})
-            if d.get('event_type') == 'PASS' and d.get('at'):
-                rid = d.get('rid', '')
+            event_type = d.get('event_type')
+            at = d.get('at')
+            rid = d.get('rid', '')
+            logger.debug("Timing event: event_type=%s rid=%s at=%s", event_type, rid, at)
+
+            if event_type == 'PASS' and at:
                 if not rid:
+                    logger.debug("Timing PASS event has no RID, skipping")
                     return
 
                 now = time_module.time()
@@ -290,23 +340,44 @@ def startLivePassListener(journeyConfig, apiConfig, event_queue):
                     del _seen_rids[old_rid]
 
                 if rid in _seen_rids:
+                    logger.debug("RID %s already seen, skipping duplicate PASS event", rid)
                     return
                 _seen_rids[rid] = now
 
+                logger.info("Live PASS detected: RID=%s — fetching service data", rid)
                 pass_data = _fetch_pass_data(rid)
                 if pass_data:
+                    logger.info("Queuing live pass display: %s %s %s→%s",
+                                pass_data['headcode'], pass_data['uid'],
+                                pass_data['origin'], pass_data['destination'])
                     event_queue.put(pass_data)
+                else:
+                    logger.warning("Could not fetch service data for PASS RID %s — not displaying", rid)
+
+    def on_error(ws, error):
+        logger.warning("Live pass WebSocket error: %s", error)
+
+    def on_close(ws, close_status_code, close_msg):
+        logger.warning("Live pass WebSocket closed (code=%s msg=%s)", close_status_code, close_msg)
 
     def run():
         backoff = 2
         while True:
             try:
-                ws = websocket.WebSocketApp(ws_url, on_message=on_message)
-                ws.run_forever(ping_interval=25, ping_timeout=30)
-            except Exception:
-                pass
+                logger.debug("Live pass WebSocket connecting (backoff=%ds)", backoff)
+                ws = websocket.WebSocketApp(
+                    ws_url,
+                    on_open=on_open,
+                    on_message=on_message,
+                    on_error=on_error,
+                    on_close=on_close,
+                )
+                ws.run_forever(ping_interval=30, ping_timeout=10)
+            except Exception as e:
+                logger.warning("Live pass WebSocket run_forever raised: %s", e)
             time_module.sleep(backoff)
             backoff = min(backoff * 2, 30)
+            logger.info("Live pass WebSocket reconnecting in %ds", backoff)
 
     t = threading.Thread(target=run, daemon=True)
     t.start()

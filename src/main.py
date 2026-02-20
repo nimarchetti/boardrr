@@ -3,10 +3,11 @@ import sys
 import time
 import json
 import queue
+import logging
 
-from datetime import timedelta
-from timeloop import Timeloop
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 from PIL import ImageFont, Image
 from helpers import get_device
 from trains import (loadDeparturesForStation, loadDestinationsForDeparture,
@@ -33,6 +34,11 @@ def makeFont(name, size):
     return ImageFont.truetype(font_path, size)
 
 
+def _textsize(text, font):
+    bbox = font.getbbox(text)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
 def renderDestination(departure, font):
     departureTime = departure["aimed_departure_time"]
     destinationName = departure["destination_name"]
@@ -57,7 +63,7 @@ def renderServiceStatus(departure):
             if departure["aimed_departure_time"] == departure["expected_departure_time"]:
                 train = "On time"
 
-        w, h = draw.textsize(train, font)
+        w, h = _textsize(train, font)
         draw.text((width-w,0), text=train, font=font, fill="yellow")
     return drawText
 
@@ -69,7 +75,9 @@ def renderPlatform(departure):
             draw.text((0, 0), text="PASS", font=font, fill="yellow")
         else:
             if isinstance(departure["platform"], str) and departure["platform"]:
-                draw.text((0, 0), text="Plat "+departure["platform"], font=font, fill="yellow")
+                at_platform = departure.get('ata') and not departure.get('atd')
+                label = "At Plat " if at_platform else "Plat "
+                draw.text((0, 0), text=label + departure["platform"], font=font, fill="yellow")
     return drawText
 
 def renderCallingAt(draw, width, height):
@@ -87,9 +95,11 @@ def renderStations(stations):
         draw.text(
             (0, 0), text=stations[stationRenderCount:], width=width, font=font, fill="yellow")
 
-        if stationRenderCount == 0 and pauseCount < 8:
-            pauseCount += 1
+        if font.getlength(stations) <= width:
             stationRenderCount = 0
+            pauseCount = 0
+        elif stationRenderCount == 0 and pauseCount < 8:
+            pauseCount += 1
         else:
             pauseCount = 0
             stationRenderCount += 1
@@ -100,8 +110,8 @@ def renderTime(draw, width, height):
     rawTime = datetime.now().time()
     hour, minute, second = str(rawTime).split('.')[0].split(':')
 
-    w1, h1 = draw.textsize("{}:{}".format(hour, minute), fontBoldLarge)
-    w2, h2 = draw.textsize(":00", fontBoldTall)
+    w1, h1 = _textsize("{}:{}".format(hour, minute), fontBoldLarge)
+    w2, h2 = _textsize(":00", fontBoldTall)
 
     draw.text(((width - w1 - w2) / 2, 0), text="{}:{}".format(hour, minute),
               font=fontBoldLarge, fill="yellow")
@@ -208,7 +218,7 @@ def drawLivePassSignage(device, width, height, message):
 
     virtualViewport = viewport(device, width=width, height=height)
 
-    rowScroll = snapshot(width, 20, renderLivePassText(message), interval=0.1)
+    rowScroll = snapshot(width, 20, renderLivePassText(message), interval=0.05)
     rowTime = snapshot(width, 14, renderTime, interval=1)
 
     if len(virtualViewport._hotspots) > 0:
@@ -221,14 +231,54 @@ def drawLivePassSignage(device, width, height, message):
     return virtualViewport
 
 
+def drawSignageWithLivePass(device, width, height, data, message):
+    global stationRenderCount, pauseCount
+
+    device.clear()
+
+    virtualViewport = viewport(device, width=width, height=height)
+
+    status = "Exp 00:00"
+    callingAt = "Calling at:"
+
+    departures, firstDepartureDestinations, departureStation = data
+
+    w, h = _textsize(callingAt, font)
+    callingWidth = w
+    width = virtualViewport.width
+
+    w, h = _textsize(status, font)
+    pw, ph = _textsize("At Plat 88", font)
+
+    rowOneA = snapshot(width - w - pw, 10, renderDestination(departures[0], fontBold), interval=10)
+    rowOneB = snapshot(w, 10, renderServiceStatus(departures[0]), interval=1)
+    rowOneC = snapshot(pw, 10, renderPlatform(departures[0]), interval=10)
+    rowTwoA = snapshot(callingWidth, 10, renderCallingAt, interval=100)
+    rowTwoB = snapshot(width - callingWidth, 10,
+                       renderStations(", ".join(firstDepartureDestinations)), interval=0.1)
+    rowLivePass = snapshot(width, 20, renderLivePassText(message), interval=0.05)
+    rowTime = snapshot(width, 14, renderTime, interval=1)
+
+    if len(virtualViewport._hotspots) > 0:
+        for hotspot, xy in virtualViewport._hotspots:
+            virtualViewport.remove_hotspot(hotspot, xy)
+
+    virtualViewport.add_hotspot(rowOneA, (0, 0))
+    virtualViewport.add_hotspot(rowOneB, (width - w, 0))
+    virtualViewport.add_hotspot(rowOneC, (width - w - pw, 0))
+    virtualViewport.add_hotspot(rowTwoA, (0, 12))
+    virtualViewport.add_hotspot(rowTwoB, (callingWidth, 12))
+    virtualViewport.add_hotspot(rowLivePass, (0, 27))
+    virtualViewport.add_hotspot(rowTime, (0, 50))
+
+    return virtualViewport
+
+
 def drawBlankSignage(device, width, height, departureStation):
     global stationRenderCount, pauseCount
 
-    with canvas(device) as draw:
-        welcomeSize = draw.textsize("Welcome to", fontBold)
-
-    with canvas(device) as draw:
-        stationSize = draw.textsize(departureStation, fontBold)
+    welcomeSize = _textsize("Welcome to", fontBold)
+    stationSize = _textsize(departureStation, fontBold)
 
     device.clear()
 
@@ -265,16 +315,12 @@ def drawSignage(device, width, height, data):
 
     departures, firstDepartureDestinations, departureStation = data
 
-    with canvas(device) as draw:
-        w, h = draw.textsize(callingAt, font)
-
+    w, h = _textsize(callingAt, font)
     callingWidth = w
     width = virtualViewport.width
 
-    # First measure the text size
-    with canvas(device) as draw:
-        w, h = draw.textsize(status, font)
-        pw, ph = draw.textsize("Plat 88", font)
+    w, h = _textsize(status, font)
+    pw, ph = _textsize("At Plat 88", font)
 
     rowOneA = snapshot(
         width - w - pw, 10, renderDestination(departures[0], fontBold), interval=10)
@@ -346,6 +392,7 @@ try:
 
     if config["apiMethod"] == 'describrr':
         data = loadDataDescribrr(config["describrr"], config["journey"])
+        logger.info("Starting live pass WebSocket listener")
         startLivePassListener(config["journey"], config["describrr"], live_pass_queue)
     elif config["apiMethod"] == 'rtt':
         data = loadDataRTT(config["rttApi"], config["journey"])
@@ -369,20 +416,24 @@ try:
                 pass_data = live_pass_queue.get_nowait()
                 livePassOffset = 0
                 livePassLaps = 0
-                calling_str = ', '.join(pass_data['calling_at']) if pass_data['calling_at'] else ''
                 live_pass_message = (
                     f"LIVE PASS  {pass_data['headcode']}  {pass_data['uid']}  "
                     f"{pass_data['origin']} to {pass_data['destination']}"
-                    + (f"  Calling: {calling_str}" if calling_str else "")
                 )
-                virtual = drawLivePassSignage(
-                    device, width=widgetWidth, height=widgetHeight, message=live_pass_message)
+                logger.info("Live pass display triggered: %s", live_pass_message)
+                if data[0] == False:
+                    virtual = drawLivePassSignage(
+                        device, width=widgetWidth, height=widgetHeight, message=live_pass_message)
+                else:
+                    virtual = drawSignageWithLivePass(
+                        device, width=widgetWidth, height=widgetHeight, data=data, message=live_pass_message)
                 live_pass_active = True
             except queue.Empty:
                 pass
 
         if live_pass_active:
             if livePassLaps >= 2:
+                logger.info("Live pass display complete, resuming normal board")
                 live_pass_active = False
                 if data[0] == False:
                     virtual = drawBlankSignage(
