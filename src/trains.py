@@ -175,7 +175,7 @@ def loadServicesForStationDescribrr(journeyConfig, apiConfig):
     station_name = data.get('name') or tiploc
 
     departures = []
-    for e in data.get('entries', []):
+    for e in (data.get('entries') or []):
         api_status = e.get('status', '')
 
         # PASS events that have already passed through are useless.
