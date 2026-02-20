@@ -1,0 +1,16 @@
+services:
+  train-display:
+    build: .
+    restart: unless-stopped
+    # privileged gives the container access to SPI and GPIO hardware.
+    # This is the simplest approach and works across all Pi models
+    # (Pi Zero 2W, Pi 4, Pi 5/500) without needing to list individual
+    # /dev/spidev* and /dev/gpiochip* paths, which differ between models.
+    privileged: true
+    # host networking is used so that if you run describrr on the same Pi
+    # and point config.json at http://localhost:8080, the container can
+    # reach it. If you use rtt or transportApi you can change this to
+    # network_mode: bridge instead.
+    network_mode: host
+    volumes:
+      - ./config.json:/app/config.json:ro

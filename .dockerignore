@@ -1,0 +1,14 @@
+.git
+.gitignore
+.vscode
+3d-printed-case
+assets
+systemd
+*.gif
+*.png
+*.md
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+config.json
