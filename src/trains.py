@@ -11,6 +11,7 @@ except ImportError:
     websocket = None
 
 def abbrStation(journeyConfig, inputStr):
+    inputStr = inputStr.title()
     dict = journeyConfig['stationAbbr']
     for key in dict.keys():
         inputStr = inputStr.replace(key, dict[key])

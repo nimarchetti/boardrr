@@ -90,9 +90,11 @@ def renderStations(stations):
         draw.text(
             (0, 0), text=stations[stationRenderCount:], width=width, font=font, fill="yellow")
 
-        if stationRenderCount == 0 and pauseCount < 8:
-            pauseCount += 1
+        if font.getlength(stations) <= width:
             stationRenderCount = 0
+            pauseCount = 0
+        elif stationRenderCount == 0 and pauseCount < 8:
+            pauseCount += 1
         else:
             pauseCount = 0
             stationRenderCount += 1
