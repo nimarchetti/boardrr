@@ -4,6 +4,7 @@ import time
 import json
 import queue
 import logging
+import threading
 
 from datetime import datetime
 
@@ -54,7 +55,12 @@ def renderServiceStatus(departure):
     def drawText(draw, width, height):
         train = ""
 
-        if departure["status"] == "CANCELLED" or departure["status"] == "CANCELLED_CALL" or departure["status"] == "CANCELLED_PASS":
+        if departure.get('atd'):
+            # Platform column shows "Dep HH:MM" — nothing needed here.
+            train = ""
+        elif departure.get('ata'):
+            train = "Arrived"
+        elif departure["status"] == "CANCELLED" or departure["status"] == "CANCELLED_CALL" or departure["status"] == "CANCELLED_PASS":
             train = "Cancelled"
         else:
             if isinstance(departure["expected_departure_time"], str):
@@ -74,10 +80,11 @@ def renderPlatform(departure):
         elif departure["mode"] == "pass":
             draw.text((0, 0), text="PASS", font=font, fill="yellow")
         else:
-            if isinstance(departure["platform"], str) and departure["platform"]:
-                at_platform = departure.get('ata') and not departure.get('atd')
-                label = "At Plat " if at_platform else "Plat "
-                draw.text((0, 0), text=label + departure["platform"], font=font, fill="yellow")
+            atd = departure.get('atd')
+            if atd:
+                draw.text((0, 0), text="Dep " + atd[:5], font=font, fill="yellow")
+            elif isinstance(departure["platform"], str) and departure["platform"]:
+                draw.text((0, 0), text="Plat " + departure["platform"], font=font, fill="yellow")
     return drawText
 
 def renderCallingAt(draw, width, height):
@@ -105,6 +112,26 @@ def renderStations(stations):
             stationRenderCount += 1
 
     return drawText
+
+def renderStationsPixel(stations, pixels_per_step):
+    def drawText(draw, width, height):
+        global stationRenderCount, pauseCount
+        text_width = int(font.getlength(stations))
+        if text_width <= width:
+            draw.text((0, 0), text=stations, font=font, fill="yellow")
+            stationRenderCount = 0
+            pauseCount = 0
+            return
+        draw.text((-stationRenderCount, 0), text=stations, font=font, fill="yellow")
+        if stationRenderCount == 0 and pauseCount < 8:
+            pauseCount += 1
+        else:
+            pauseCount = 0
+            stationRenderCount += pixels_per_step
+            if stationRenderCount >= text_width + 30:
+                stationRenderCount = 0
+    return drawText
+
 
 def renderTime(draw, width, height):
     rawTime = datetime.now().time()
@@ -212,13 +239,36 @@ def renderLivePassText(message):
     return drawText
 
 
+def renderLivePassTextPixel(message, pixels_per_step):
+    def drawText(draw, width, height):
+        global livePassOffset, livePassLaps
+        padded = message + "     "
+        text_width = int(fontBoldLarge.getlength(padded))
+        if livePassOffset >= text_width:
+            livePassOffset = 0
+            livePassLaps += 1
+        draw.text((-livePassOffset, 0), text=padded, font=fontBoldLarge, fill="yellow")
+        livePassOffset += pixels_per_step
+    return drawText
+
+
+def _get_scroll_config(cfg_key, default_mode, default_interval):
+    """Read scrolling config for a given key ('callingPoints' or 'livePass')."""
+    cfg = config.get('scrolling', {}).get(cfg_key, {})
+    mode = cfg.get('mode', default_mode)
+    interval = float(cfg.get('interval', default_interval))
+    pixels_per_step = int(cfg.get('pixelsPerStep', 1))
+    return mode, interval, pixels_per_step
+
+
 def drawLivePassSignage(device, width, height, message):
     global livePassOffset, livePassLaps
-    device.clear()
 
     virtualViewport = viewport(device, width=width, height=height)
 
-    rowScroll = snapshot(width, 20, renderLivePassText(message), interval=0.05)
+    lp_mode, lp_interval, lp_pps = _get_scroll_config('livePass', 'character', 0.05)
+    lp_render = renderLivePassTextPixel(message, lp_pps) if lp_mode == 'pixel' else renderLivePassText(message)
+    rowScroll = snapshot(width, 20, lp_render, interval=lp_interval)
     rowTime = snapshot(width, 14, renderTime, interval=1)
 
     if len(virtualViewport._hotspots) > 0:
@@ -233,8 +283,6 @@ def drawLivePassSignage(device, width, height, message):
 
 def drawSignageWithLivePass(device, width, height, data, message):
     global stationRenderCount, pauseCount
-
-    device.clear()
 
     virtualViewport = viewport(device, width=width, height=height)
 
@@ -253,10 +301,14 @@ def drawSignageWithLivePass(device, width, height, data, message):
     rowOneA = snapshot(width - w - pw, 10, renderDestination(departures[0], fontBold), interval=10)
     rowOneB = snapshot(w, 10, renderServiceStatus(departures[0]), interval=1)
     rowOneC = snapshot(pw, 10, renderPlatform(departures[0]), interval=10)
+    cp_mode, cp_interval, cp_pps = _get_scroll_config('callingPoints', 'character', 0.1)
+    lp_mode, lp_interval, lp_pps = _get_scroll_config('livePass', 'character', 0.05)
+    stations_str = ", ".join(firstDepartureDestinations)
+    cp_render = renderStationsPixel(stations_str, cp_pps) if cp_mode == 'pixel' else renderStations(stations_str)
+    lp_render = renderLivePassTextPixel(message, lp_pps) if lp_mode == 'pixel' else renderLivePassText(message)
     rowTwoA = snapshot(callingWidth, 10, renderCallingAt, interval=100)
-    rowTwoB = snapshot(width - callingWidth, 10,
-                       renderStations(", ".join(firstDepartureDestinations)), interval=0.1)
-    rowLivePass = snapshot(width, 20, renderLivePassText(message), interval=0.05)
+    rowTwoB = snapshot(width - callingWidth, 10, cp_render, interval=cp_interval)
+    rowLivePass = snapshot(width, 20, lp_render, interval=lp_interval)
     rowTime = snapshot(width, 14, renderTime, interval=1)
 
     if len(virtualViewport._hotspots) > 0:
@@ -279,8 +331,6 @@ def drawBlankSignage(device, width, height, departureStation):
 
     welcomeSize = _textsize("Welcome to", fontBold)
     stationSize = _textsize(departureStation, fontBold)
-
-    device.clear()
 
     virtualViewport = viewport(device, width=width, height=height)
 
@@ -306,8 +356,6 @@ def drawBlankSignage(device, width, height, departureStation):
 def drawSignage(device, width, height, data):
     global stationRenderCount, pauseCount
 
-    device.clear()
-
     virtualViewport = viewport(device, width=width, height=height)
 
     status = "Exp 00:00"
@@ -327,9 +375,11 @@ def drawSignage(device, width, height, data):
     rowOneB = snapshot(w, 10, renderServiceStatus(
         departures[0]), interval=1)
     rowOneC = snapshot(pw, 10, renderPlatform(departures[0]), interval=10)
+    cp_mode, cp_interval, cp_pps = _get_scroll_config('callingPoints', 'character', 0.1)
+    stations_str = ", ".join(firstDepartureDestinations)
+    cp_render = renderStationsPixel(stations_str, cp_pps) if cp_mode == 'pixel' else renderStations(stations_str)
     rowTwoA = snapshot(callingWidth, 10, renderCallingAt, interval=100)
-    rowTwoB = snapshot(width - callingWidth, 10,
-                       renderStations(", ".join(firstDepartureDestinations)), interval=0.1)
+    rowTwoB = snapshot(width - callingWidth, 10, cp_render, interval=cp_interval)
     if(len(departures) > 1):
         rowThreeA = snapshot(width - w - pw, 10, renderDestination(
             departures[1],font), interval=10)
@@ -389,11 +439,12 @@ try:
 
     live_pass_queue = queue.Queue()
     live_pass_active = False
+    refresh_event = threading.Event()
 
     if config["apiMethod"] == 'describrr':
         data = loadDataDescribrr(config["describrr"], config["journey"])
         logger.info("Starting live pass WebSocket listener")
-        startLivePassListener(config["journey"], config["describrr"], live_pass_queue)
+        startLivePassListener(config["journey"], config["describrr"], live_pass_queue, refresh_event)
     elif config["apiMethod"] == 'rtt':
         data = loadDataRTT(config["rttApi"], config["journey"])
     else:
@@ -442,7 +493,11 @@ try:
                     virtual = drawSignage(device, width=widgetWidth,
                                           height=widgetHeight, data=data)
         else:
-            if(timeNow - timeAtStart >= config["refreshTime"]):
+            ws_triggered = config["apiMethod"] == 'describrr' and refresh_event.is_set()
+            if ws_triggered or timeNow - timeAtStart >= config["refreshTime"]:
+                if ws_triggered:
+                    refresh_event.clear()
+                    logger.info("WebSocket event triggered board refresh")
                 if config["apiMethod"] == 'describrr':
                     data = loadDataDescribrr(config["describrr"], config["journey"])
                 elif config["apiMethod"] == 'rtt':

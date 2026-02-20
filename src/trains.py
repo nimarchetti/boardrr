@@ -4,7 +4,7 @@ import requests
 import json
 import threading
 import time as time_module
-from datetime import date
+from datetime import date, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -161,11 +161,14 @@ def _pick_time(primary, *fallbacks):
 def loadServicesForStationDescribrr(journeyConfig, apiConfig):
     tiploc = apiConfig['tiploc']
     host = apiConfig['host'].rstrip('/')
+    now = datetime.now()
+    # Query from 3 minutes ago so recently-departed services are still returned.
+    from_time = (now - timedelta(minutes=3)).strftime('%H:%M')
     params = {
         'direction': 'all',
-        'from': 'now',
+        'from': from_time,
         'to': 'now+2h',
-        'limit': 5,
+        'limit': 10,
     }
     r = requests.get(f"{host}/v1/boards/{tiploc}", params=params, timeout=10)
     data = r.json()
@@ -173,8 +176,27 @@ def loadServicesForStationDescribrr(journeyConfig, apiConfig):
 
     departures = []
     for e in data.get('entries', []):
-        if e.get('status') in ('arrived', 'departed', 'passed'):
+        api_status = e.get('status', '')
+
+        # PASS events that have already passed through are useless.
+        if api_status == 'passed':
             continue
+
+        # Departed services: keep for 2 minutes so row 1 can show "Dep HH:MM".
+        if api_status == 'departed':
+            atd = e.get('atd')
+            if not atd:
+                continue
+            try:
+                parts = atd.split(':')
+                dep_dt = now.replace(
+                    hour=int(parts[0]), minute=int(parts[1]),
+                    second=int(parts[2]) if len(parts) > 2 else 0,
+                    microsecond=0)
+                if (now - dep_dt).total_seconds() > 120:
+                    continue
+            except (ValueError, IndexError):
+                continue
 
         event_type = e.get('event_type', 'DEP')
 
@@ -259,7 +281,7 @@ def loadDestinationsForServiceDescribrr(journeyConfig, apiConfig, rid):
     return calling_at, dest_name
 
 
-def startLivePassListener(journeyConfig, apiConfig, event_queue):
+def startLivePassListener(journeyConfig, apiConfig, event_queue, refresh_event=None):
     if websocket is None:
         logger.warning("websocket-client not installed — live pass listener disabled")
         return
@@ -353,6 +375,10 @@ def startLivePassListener(journeyConfig, apiConfig, event_queue):
                     event_queue.put(pass_data)
                 else:
                     logger.warning("Could not fetch service data for PASS RID %s — not displaying", rid)
+
+            elif event_type in ('ARR', 'DEP') and at and refresh_event is not None:
+                logger.info("Timing %s at %s for RID %s — triggering board refresh", event_type, tiploc, rid)
+                refresh_event.set()
 
     def on_error(ws, error):
         logger.warning("Live pass WebSocket error: %s", error)
