@@ -171,7 +171,7 @@ def loadServicesForStationDescribrr(journeyConfig, apiConfig):
         'limit': 10,
     }
     r = requests.get(f"{host}/v1/boards/{tiploc}", params=params, timeout=10)
-    data = r.json()
+    data = r.json() or {}
     station_name = data.get('name') or tiploc
 
     departures = []

@@ -459,6 +459,8 @@ try:
 
     timeAtStart = time.time()
     timeNow = time.time()
+    _fps_frames = 0
+    _fps_last = time.time()
 
     while True:
         # Check for a live pass event from the WebSocket listener
@@ -516,6 +518,11 @@ try:
 
         timeNow = time.time()
         virtual.refresh()
+        _fps_frames += 1
+        if timeNow - _fps_last >= 10:
+            logger.debug("Display refresh rate: %.1f fps", _fps_frames / (timeNow - _fps_last))
+            _fps_frames = 0
+            _fps_last = timeNow
 
 except KeyboardInterrupt:
     pass
