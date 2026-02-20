@@ -4,6 +4,6 @@ luma.emulator
 Pillow>=10.0
 requests
 websocket-client
-RPi.GPIO
+rpi-lgpio
 smbus2
 spidev
