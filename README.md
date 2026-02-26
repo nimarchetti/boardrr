@@ -25,7 +25,7 @@ By combining all three, describrr tracks **every** train moving through a corrid
 
 When connected to describrr, the display shows all of these. Passing services — trains that pass through the location without stopping — are shown with a **PASS** label in place of the platform number. When a train is detected passing in real time via describrr's WebSocket feed, the display interrupts the normal board and shows a large scrolling **LIVE PASS** message with the headcode, service UID, origin, destination, and calling points.
 
-Describrr is designed to run on a Raspberry Pi on the local network. The display connects to it over HTTP and WebSocket — no external API keys or internet connection required once it is running.
+The display connects to describrr over HTTPS and WebSocket, and every API/WebSocket request includes an API key in the `X-API-Key` header.
 
 ### Real Time Trains API
 
@@ -87,7 +87,8 @@ Copy `config.sample.json` to `config.json` and fill in the relevant sections for
   },
   "describrr": {
     "tiploc": "",
-    "host": "http://localhost:8080",
+    "host": "https://describrr.foro.co.uk",
+    "apiKey": "",
     "operatingHours": "6-23"
   },
   "apiMethod": "rtt"
@@ -112,7 +113,9 @@ Copy `config.sample.json` to `config.json` and fill in the relevant sections for
 
 `tiploc` — the [TIPLOC code](https://wiki.openraildata.com/index.php/TIPLOC) for your display location. TIPLOCs are the internal location identifiers used by the UK rail network — for example `SMILFD` for South Milford or `LEEDS` for Leeds. This must match a location that describrr has in its timetable and berth data.
 
-`host` — the base URL of your running describrr instance. If the display is on the same machine or local network as describrr, this will typically be `http://<raspberry-pi-ip>:8080`.
+`host` — the base URL of your describrr API server, for example `https://describrr.foro.co.uk`.
+
+`apiKey` — your describrr API key. This is sent on every HTTP request and as part of the WebSocket upgrade request using the `X-API-Key` header.
 
 `operatingHours` — the range of hours during which the display should actively fetch data, in `HH-HH` format (e.g. `6-23`).
 

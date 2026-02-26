@@ -461,8 +461,12 @@ try:
     timeNow = time.time()
     _fps_frames = 0
     _fps_last = time.time()
+    target_fps = 30
+    frame_time = 1.0 / target_fps
 
     while True:
+        loop_start = time.time()
+        
         # Check for a live pass event from the WebSocket listener
         if config["apiMethod"] == 'describrr':
             try:
@@ -520,9 +524,15 @@ try:
         virtual.refresh()
         _fps_frames += 1
         if timeNow - _fps_last >= 10:
-            logger.debug("Display refresh rate: %.1f fps", _fps_frames / (timeNow - _fps_last))
+            logger.info("Display refresh rate: %.1f fps", _fps_frames / (timeNow - _fps_last))
             _fps_frames = 0
             _fps_last = timeNow
+        
+        # Sleep to limit frame rate and reduce CPU usage
+        elapsed = time.time() - loop_start
+        sleep_time = frame_time - elapsed
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
 except KeyboardInterrupt:
     pass

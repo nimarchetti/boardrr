@@ -7,9 +7,10 @@ services:
     # (Pi Zero 2W, Pi 4, Pi 5/500) without needing to list individual
     # /dev/spidev* and /dev/gpiochip* paths, which differ between models.
     privileged: true
-    # host networking is used so that if you run describrr on the same Pi
-    # and point config.json at http://localhost:8080, the container can
-    # reach it. If you use rtt or transportApi you can change this to
+    # host networking is used for simplest hardware access on Raspberry Pi.
+    # describrr endpoint/auth is configured in config.json (for example
+    # https://describrr.foro.co.uk with apiKey). If you use rtt or
+    # transportApi you can change this to
     # network_mode: bridge instead.
     network_mode: host
     volumes:

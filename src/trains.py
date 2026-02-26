@@ -158,9 +158,18 @@ def _pick_time(primary, *fallbacks):
     return None
 
 
+def _describrr_headers(apiConfig):
+    api_key = (apiConfig.get('apiKey') or '').strip()
+    if not api_key:
+        raise ValueError(
+            "Please set the describrr.apiKey property in config.json")
+    return {'X-API-Key': api_key}
+
+
 def loadServicesForStationDescribrr(journeyConfig, apiConfig):
     tiploc = apiConfig['tiploc']
     host = apiConfig['host'].rstrip('/')
+    headers = _describrr_headers(apiConfig)
     now = datetime.now()
     # Query from 3 minutes ago so recently-departed services are still returned.
     from_time = (now - timedelta(minutes=3)).strftime('%H:%M')
@@ -170,7 +179,7 @@ def loadServicesForStationDescribrr(journeyConfig, apiConfig):
         'to': 'now+2h',
         'limit': 10,
     }
-    r = requests.get(f"{host}/v1/boards/{tiploc}", params=params, timeout=10)
+    r = requests.get(f"{host}/v1/boards/{tiploc}", params=params, headers=headers, timeout=10)
     data = r.json() or {}
     station_name = data.get('name') or tiploc
 
@@ -238,8 +247,9 @@ def loadServicesForStationDescribrr(journeyConfig, apiConfig):
 
 def loadDestinationsForServiceDescribrr(journeyConfig, apiConfig, rid):
     host = apiConfig['host'].rstrip('/')
+    headers = _describrr_headers(apiConfig)
     board_tiploc = apiConfig['tiploc']
-    r = requests.get(f"{host}/v1/services/{rid}", timeout=10)
+    r = requests.get(f"{host}/v1/services/{rid}", headers=headers, timeout=10)
     data = r.json()
 
     stops = data.get('stops', [])
@@ -285,8 +295,10 @@ def startLivePassListener(journeyConfig, apiConfig, event_queue, refresh_event=N
     if websocket is None:
         logger.warning("websocket-client not installed — live pass listener disabled")
         return
+    ws_client = websocket
 
     host = apiConfig['host'].rstrip('/')
+    headers = _describrr_headers(apiConfig)
     tiploc = apiConfig['tiploc']
     ws_url = host.replace('https://', 'wss://').replace('http://', 'ws://') + f"/v1/ws/boards/{tiploc}"
 
@@ -296,7 +308,7 @@ def startLivePassListener(journeyConfig, apiConfig, event_queue, refresh_event=N
 
     def _fetch_pass_data(rid):
         try:
-            r = requests.get(f"{host}/v1/services/{rid}", timeout=10)
+            r = requests.get(f"{host}/v1/services/{rid}", headers=headers, timeout=10)
             data = r.json()
             stops = data.get('stops', [])
             headcode = data.get('headcode', '????')
@@ -391,8 +403,9 @@ def startLivePassListener(journeyConfig, apiConfig, event_queue, refresh_event=N
         while True:
             try:
                 logger.debug("Live pass WebSocket connecting (backoff=%ds)", backoff)
-                ws = websocket.WebSocketApp(
+                ws = ws_client.WebSocketApp(
                     ws_url,
+                    header=headers,
                     on_open=on_open,
                     on_message=on_message,
                     on_error=on_error,
