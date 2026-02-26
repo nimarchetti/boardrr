@@ -6,6 +6,10 @@ import queue
 import logging
 import threading
 
+# Disable PIL threading to reduce CPU overhead
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
