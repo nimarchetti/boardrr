@@ -1,27 +1,12 @@
 import os
 import logging
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 import json
 import threading
 import time as time_module
 from datetime import date, datetime, timedelta
 
 logger = logging.getLogger(__name__)
-
-# Create a single session with limited connection pool to reduce thread count
-_http_session = None
-
-def get_http_session():
-    global _http_session
-    if _http_session is None:
-        _http_session = requests.Session()
-        # Limit pool to 1 connection to prevent thread spawning
-        adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1)
-        _http_session.mount('http://', adapter)
-        _http_session.mount('https://', adapter)
-    return _http_session
 
 try:
     import websocket
@@ -46,7 +31,7 @@ def loadDeparturesForStationRTT(journeyConfig, username, password):
 
     departureStation = journeyConfig["departureStation"]
 
-    response = get_http_session().get(f"https://api.rtt.io/api/v1/json/search/{departureStation}", auth=(username, password))
+    response = requests.get(f"https://api.rtt.io/api/v1/json/search/{departureStation}", auth=(username, password))
     data = response.json()
     translated_departures = []
     td = date.today()
@@ -81,7 +66,7 @@ def loadDeparturesForStationRTT(journeyConfig, username, password):
     return translated_departures, departureStation
 
 def loadDestinationsForDepartureRTT(journeyConfig, username, password, timetableUrl):
-    r = get_http_session().get(url=timetableUrl, auth=(username, password))
+    r = requests.get(url=timetableUrl, auth=(username, password))
     calling_data = r.json()
 
     index = 0
@@ -116,7 +101,7 @@ def loadDeparturesForStation(journeyConfig, appId, apiKey):
               'app_key': apiKey,
               'calling_at': journeyConfig["destinationStation"]}
 
-    r = get_http_session().get(url=URL, params=PARAMS)
+    r = requests.get(url=URL, params=PARAMS)
 
     data = r.json()
     #apply abbreviations / replacements to station names (long stations names dont look great on layout)
@@ -132,7 +117,7 @@ def loadDeparturesForStation(journeyConfig, appId, apiKey):
 
 
 def loadDestinationsForDeparture(journeyConfig, timetableUrl):
-    r = get_http_session().get(url=timetableUrl)
+    r = requests.get(url=timetableUrl)
 
     data = r.json()
 
@@ -194,7 +179,7 @@ def loadServicesForStationDescribrr(journeyConfig, apiConfig):
         'to': 'now+2h',
         'limit': 10,
     }
-    r = get_http_session().get(f"{host}/v1/boards/{tiploc}", params=params, headers=headers, timeout=10)
+    r = requests.get(f"{host}/v1/boards/{tiploc}", params=params, headers=headers, timeout=10)
     data = r.json() or {}
     station_name = data.get('name') or tiploc
 
@@ -264,7 +249,7 @@ def loadDestinationsForServiceDescribrr(journeyConfig, apiConfig, rid):
     host = apiConfig['host'].rstrip('/')
     headers = _describrr_headers(apiConfig)
     board_tiploc = apiConfig['tiploc']
-    r = get_http_session().get(f"{host}/v1/services/{rid}", headers=headers, timeout=10)
+    r = requests.get(f"{host}/v1/services/{rid}", headers=headers, timeout=10)
     data = r.json()
 
     stops = data.get('stops', [])
@@ -323,7 +308,7 @@ def startLivePassListener(journeyConfig, apiConfig, event_queue, refresh_event=N
 
     def _fetch_pass_data(rid):
         try:
-            r = get_http_session().get(f"{host}/v1/services/{rid}", headers=headers, timeout=10)
+            r = requests.get(f"{host}/v1/services/{rid}", headers=headers, timeout=10)
             data = r.json()
             stops = data.get('stops', [])
             headcode = data.get('headcode', '????')
