@@ -1,0 +1,40 @@
+{
+  "journey": {
+    "departureStation": "",
+    "destinationStation": null,
+    "outOfHoursName": "South Milford",
+    "stationAbbr": {
+      "International": "Intl."
+    }
+  },
+  "refreshTime": 180,
+  "transportApi": {
+    "appId": "",
+    "apiKey": "",
+    "operatingHours": "0-23"
+  },
+  "rttApi": {
+    "username": "",
+    "password": "",
+    "operatingHours": "6-23"
+  },
+  "describrr": {
+    "tiploc": "SELBY",
+    "host": "https://describrr.foro.co.uk",
+    "apiKey": "dbf621ebe8a4a505fb4bac3426c0c4ca21b54c00a1df1210d91adf74a5fe18d6",
+    "operatingHours": "0-23"
+  },
+  "apiMethod": "describrr",
+  "scrolling": {
+    "callingPoints": {
+      "mode": "pixel",
+      "interval": 0.05,
+      "pixelsPerStep": 2
+    },
+    "livePass": {
+      "mode": "pixel",
+      "interval": 0.05,
+      "pixelsPerStep": 3
+    }
+  }
+}
