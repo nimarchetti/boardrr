@@ -1,0 +1,26 @@
+services:
+  train-display:
+    image: ghcr.io/nimarchetti/uk-train-departure-display:latest
+    restart: unless-stopped
+    privileged: true
+    network_mode: host
+    # Adjust --rotate as needed (0 = no rotation, 2 = 180°)
+    command: ["--display", "ssd1322", "--width", "256", "--height", "64",
+              "--interface", "spi", "--mode", "1", "--rotate", "0"]
+    volumes:
+      - ./config.json:/app/config.json:ro
+
+  watchtower:
+    image: containrrr/watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Passes GHCR credentials in to Watchtower so it can pull private images.
+      # Log in first: echo $PAT | docker login ghcr.io -u nimarchetti --password-stdin
+      - /home/pi/.docker/config.json:/config.json:ro
+    environment:
+      - DOCKER_CONFIG=/
+      - WATCHTOWER_POLL_INTERVAL=300   # check every 5 minutes
+      - WATCHTOWER_CLEANUP=true        # remove old images after update
+    # Only watch the train-display container
+    command: train-display
