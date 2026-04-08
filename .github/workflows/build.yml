@@ -32,8 +32,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          # arm/v6 = Pi Zero 1W  arm/v7 = Pi Zero 2W (32-bit)  arm64 = Pi Zero 2W (64-bit)
-          platforms: linux/arm/v6,linux/arm/v7,linux/arm64
+          platforms: linux/arm64
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/uk-train-departure-display:latest
           cache-from: type=gha

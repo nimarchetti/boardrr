@@ -1,9 +1,11 @@
 FROM python:3.11-slim-bookworm
 
-# gcc and python3-dev are needed to compile C extensions (spidev, lgpio)
+# gcc, python3-dev, libc6-dev needed to compile C extensions (spidev, rpi-lgpio)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     python3-dev \
+    libc6-dev \
+    libgpiod-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
