@@ -291,10 +291,57 @@ def loadDestinationsForServiceDescribrr(journeyConfig, apiConfig, rid):
     return calling_at, dest_name
 
 
-def startLivePassListener(journeyConfig, apiConfig, event_queue, refresh_event=None):
+def loadCorridors(apiConfig) -> list:
+    """
+    GET /v1/corridors
+    Returns list of dicts: [{'code': str, 'name': str, 'train_count': int}, ...]
+    Returns [] on any error.
+    """
+    host = apiConfig['host'].rstrip('/')
+    headers = _describrr_headers(apiConfig)
+    try:
+        r = requests.get(f"{host}/v1/corridors", headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return data.get('corridors') or []
+    except Exception as exc:
+        logger.warning("loadCorridors failed: %s", exc)
+        return []
+
+
+def loadCorridorDetail(apiConfig, code) -> list:
+    """
+    GET /v1/corridors/{code}
+    Returns list of station dicts:
+      [{'tiploc': str, 'name': str, 'crs': str, 'sort_order': int}, ...]
+    Sorted by sort_order ascending. Returns [] on any error.
+    """
+    host = apiConfig['host'].rstrip('/')
+    headers = _describrr_headers(apiConfig)
+    try:
+        r = requests.get(f"{host}/v1/corridors/{code}", headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        stations = data.get('stations') or []
+        stations.sort(key=lambda s: s.get('sort_order', 0))
+        return stations
+    except Exception as exc:
+        logger.warning("loadCorridorDetail(%s) failed: %s", code, exc)
+        return []
+
+
+def startLivePassListener(journeyConfig, apiConfig, event_queue, refresh_event=None, stop_event=None):
+    """
+    Start the live pass WebSocket listener in a daemon thread.
+    Returns the stop_event (a threading.Event) — set it to stop the listener.
+    Call this function again with the updated apiConfig to restart on a new tiploc.
+    """
+    if stop_event is None:
+        stop_event = threading.Event()
+
     if websocket is None:
         logger.warning("websocket-client not installed — live pass listener disabled")
-        return
+        return stop_event
     ws_client = websocket
 
     host = apiConfig['host'].rstrip('/')
@@ -364,6 +411,9 @@ def startLivePassListener(journeyConfig, apiConfig, event_queue, refresh_event=N
             logger.debug("Timing event: event_type=%s rid=%s at=%s", event_type, rid, at)
 
             if event_type == 'PASS' and at:
+                if at != tiploc:
+                    logger.debug("PASS event at %s ignored (subscribed to %s)", at, tiploc)
+                    return
                 if not rid:
                     logger.debug("Timing PASS event has no RID, skipping")
                     return
@@ -401,6 +451,9 @@ def startLivePassListener(journeyConfig, apiConfig, event_queue, refresh_event=N
     def run():
         backoff = 2
         while True:
+            if stop_event.is_set():
+                logger.info("Live pass listener stopping (stop_event set) for %s", ws_url)
+                return
             try:
                 logger.debug("Live pass WebSocket connecting (backoff=%ds)", backoff)
                 ws = ws_client.WebSocketApp(
@@ -414,10 +467,14 @@ def startLivePassListener(journeyConfig, apiConfig, event_queue, refresh_event=N
                 ws.run_forever(ping_interval=30, ping_timeout=10)
             except Exception as e:
                 logger.warning("Live pass WebSocket run_forever raised: %s", e)
+            if stop_event.is_set():
+                logger.info("Live pass listener stopping after disconnect for %s", ws_url)
+                return
             time_module.sleep(backoff)
             backoff = min(backoff * 2, 30)
             logger.info("Live pass WebSocket reconnecting in %ds", backoff)
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
+    return stop_event
 

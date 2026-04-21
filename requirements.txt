@@ -1,9 +1,5 @@
 luma.core
-luma.oled
-luma.emulator
 Pillow>=10.0
 requests
 websocket-client
-rpi-lgpio
-smbus2
-spidev
+pyzmq

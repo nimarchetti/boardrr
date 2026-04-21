@@ -1,18 +1,9 @@
 FROM python:3.11-slim-bookworm
 
-# gcc, python3-dev, libc6-dev needed to compile C extensions (spidev, rpi-lgpio)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    python3-dev \
-    libc6-dev \
-    libgpiod-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
 COPY requirements.txt .
-# luma.emulator (pygame) is only needed for desktop development, not on hardware
-RUN grep -v 'luma.emulator' requirements.txt | pip install --no-cache-dir -r /dev/stdin
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
 
@@ -24,5 +15,3 @@ ENV PILLOW_MAX_IMAGE_PIXELS=None \
 
 # config.json is mounted at runtime via docker-compose volume
 ENTRYPOINT ["python3", "src/main.py"]
-CMD ["--display", "ssd1322", "--width", "256", "--height", "64", \
-     "--interface", "spi", "--mode", "1", "--rotate", "2"]
