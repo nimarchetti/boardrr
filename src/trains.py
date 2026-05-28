@@ -411,8 +411,8 @@ def startLivePassListener(journeyConfig, apiConfig, event_queue, refresh_event=N
             logger.debug("Timing event: event_type=%s rid=%s at=%s", event_type, rid, at)
 
             if event_type == 'PASS' and at:
-                if at != tiploc:
-                    logger.debug("PASS event at %s ignored (subscribed to %s)", at, tiploc)
+                if d.get('tiploc') != tiploc:
+                    logger.debug("PASS event at %s ignored (subscribed to %s)", d.get('tiploc'), tiploc)
                     return
                 if not rid:
                     logger.debug("Timing PASS event has no RID, skipping")

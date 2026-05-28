@@ -55,23 +55,21 @@ class _ZMQDevice:
         Called by luma's viewport.refresh() with a PIL Image of size
         (self.width, self.height) and mode self.mode.
 
-        Sends a two-part ZMQ message:
-          Part 1: JSON header (UTF-8 bytes)
-          Part 2: raw pixel bytes (RGB24: width * height * 3 bytes)
+        Sends a four-part ZMQ message:
+          Part 1: mode_name (bytes)
+          Part 2: width (bytes, ASCII decimal)
+          Part 3: height (bytes, ASCII decimal)
+          Part 4: raw pixel bytes
         """
         import zmq
-        pixel_format = "RGB24" if image.mode == "RGB" else "L"
-        header = json.dumps({
-            "width": image.width,
-            "height": image.height,
-            "pixel_format": pixel_format,
-            "sequence": self._sequence,
-            "timestamp_ms": int(time.time() * 1000),
-        }).encode("utf-8")
         try:
-            self._frame_socket.send_multipart([header, image.tobytes()], flags=zmq.NOBLOCK)
+            self._frame_socket.send_multipart([
+                self._mode_name.encode(),
+                str(image.width).encode(),
+                str(image.height).encode(),
+                image.tobytes(),
+            ], flags=zmq.NOBLOCK)
         except Exception as exc:
-            # Swallow ZMQ EAGAIN (HWM reached) — frame drop at full buffer is normal
             logger.debug("ZMQ send skipped: %s", exc)
         self._sequence += 1
 
@@ -111,16 +109,16 @@ def _create_zmq_device():
     Set up ZMQ PUSH + SUB sockets and return a _ZMQDevice shim.
 
     Required environment variables:
-      SWITCHRR_FRAME_ADDRESS  — ZMQ address to PUSH frames to
-      SWITCHRR_EVENT_ADDRESS  — ZMQ address to SUB events from
-      MODE_NAME               — this container's mode identifier
-      DISPLAY_WIDTH           — display width in pixels (default 256)
-      DISPLAY_HEIGHT          — display height in pixels (default 64)
+      SWITCHRR_FRAME_BIND_ADDRESS — ZMQ address this container PUB-binds for frames
+      SWITCHRR_EVENT_ADDRESS      — ZMQ address to SUB events from
+      MODE_NAME                   — this container's mode identifier
+      DISPLAY_WIDTH               — display width in pixels (default 256)
+      DISPLAY_HEIGHT              — display height in pixels (default 64)
     """
     import queue as _queue
     import zmq
 
-    frame_address = os.environ["SWITCHRR_FRAME_ADDRESS"]
+    frame_address = os.environ["SWITCHRR_FRAME_BIND_ADDRESS"]
     event_address = os.environ["SWITCHRR_EVENT_ADDRESS"]
     mode_name = os.environ["MODE_NAME"]
     width = int(os.environ.get("DISPLAY_WIDTH", "256"))
@@ -128,9 +126,9 @@ def _create_zmq_device():
 
     context = zmq.Context()
 
-    frame_socket = context.socket(zmq.PUSH)
-    frame_socket.connect(frame_address)
-    logger.info("ZMQ PUSH connected to %s", frame_address)
+    frame_socket = context.socket(zmq.PUB)
+    frame_socket.bind(frame_address)
+    logger.info("ZMQ PUB bound at %s", frame_address)
 
     event_socket = context.socket(zmq.SUB)
     event_socket.connect(event_address)
@@ -175,7 +173,7 @@ def create_output():
             raise SystemExit(
                 f"OUTPUT_MODE=zmq but pyzmq is not installed: {exc}"
             ) from exc
-        for var in ("SWITCHRR_FRAME_ADDRESS", "SWITCHRR_EVENT_ADDRESS", "MODE_NAME"):
+        for var in ("SWITCHRR_FRAME_BIND_ADDRESS", "SWITCHRR_EVENT_ADDRESS", "MODE_NAME"):
             if not os.environ.get(var):
                 raise SystemExit(
                     f"OUTPUT_MODE=zmq requires environment variable {var!r} to be set."
