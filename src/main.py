@@ -5,6 +5,8 @@ import json
 import queue
 import logging
 import threading
+import functools
+from collections import namedtuple
 
 # Disable PIL threading to reduce CPU overhead
 os.environ['OPENBLAS_NUM_THREADS'] = '1'
@@ -41,6 +43,78 @@ def makeFont(name, size):
 def _textsize(text, font):
     bbox = font.getbbox(text)
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+# ---------------------------------------------------------------------------
+# Responsive layout
+# ---------------------------------------------------------------------------
+
+NATIVE_W, NATIVE_H = 256, 64
+
+LayoutParams = namedtuple(
+    'LayoutParams',
+    ['font_size', 'font_large_size', 'row_pitch', 'clock_height',
+     'num_trains', 'wide_mode', 'extra_col_width', 'font_scale'],
+)
+
+_layout = None  # set in startup block
+
+
+@functools.lru_cache(maxsize=None)
+def _get_font(name, size):
+    return makeFont(name, size)
+
+
+def _parse_display_sizes():
+    """Return list of (width, height) for this mode from DISPLAY_REGISTRY."""
+    raw = os.environ.get("DISPLAY_REGISTRY", "").strip()
+    mode_name = os.environ.get("MODE_NAME", "uk_tdd")
+    if raw:
+        try:
+            registry = json.loads(raw)
+            sizes, seen = [], set()
+            for entry in registry:
+                if any(m.get("mode_name") == mode_name for m in entry.get("modes", [])):
+                    wh = (int(entry["width"]), int(entry["height"]))
+                    if wh not in seen:
+                        seen.add(wh)
+                        sizes.append(wh)
+            if sizes:
+                return sizes
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return [(int(os.environ.get("DISPLAY_WIDTH", "256")),
+             int(os.environ.get("DISPLAY_HEIGHT", "64")))]
+
+
+def _compute_layout(width, height):
+    """Determine responsive layout parameters for the given display dimensions."""
+    w_scale = width  / NATIVE_W
+    h_scale = height / NATIVE_H
+    if abs(w_scale - h_scale) < 0.15:
+        # Aspect ratio preserved → scale everything
+        font_scale = h_scale
+        wide_mode  = False
+    elif h_scale > w_scale:
+        # Proportionally taller → more rows, native font
+        font_scale = 1.0
+        wide_mode  = False
+    else:
+        # Proportionally wider → extra columns
+        font_scale = h_scale
+        wide_mode  = True
+    font_size       = max(10, round(10 * font_scale))
+    font_large_size = max(20, round(20 * font_scale))
+    row_pitch       = max(12, round(12 * font_scale))
+    clock_height    = max(14, round(14 * font_scale))
+    num_trains      = max(1, int((height - clock_height) / row_pitch) - 1)
+    extra_col_width = max(0, width - NATIVE_W) if wide_mode else 0
+    return LayoutParams(
+        font_size=font_size, font_large_size=font_large_size,
+        row_pitch=row_pitch, clock_height=clock_height,
+        num_trains=num_trains, wide_mode=wide_mode,
+        extra_col_width=extra_col_width, font_scale=font_scale,
+    )
 
 
 def renderDestination(departure, font):
@@ -158,7 +232,7 @@ def renderTime(draw, width, height):
 
     draw.text(((width - w1 - w2) / 2, 0), text="{}:{}".format(hour, minute),
               font=fontBoldLarge, fill="yellow")
-    draw.text((((width - w1 -w2) / 2) + w1, 5), text=":{}".format(second),
+    draw.text((((width - w1 -w2) / 2) + w1, round(5 * _layout.font_scale)), text=":{}".format(second),
               font=fontBoldTall, fill="yellow")
 
 
@@ -296,22 +370,34 @@ def _get_scroll_config(cfg_key, default_mode, default_interval):
     return mode, interval, pixels_per_step
 
 
+def _render_static_text(text):
+    """Render non-scrolling text, clipped at snapshot width."""
+    def drawText(draw, width, height):
+        if text:
+            draw.text((0, 0), text=text, font=font, fill="yellow")
+    return drawText
+
+
 def drawLivePassSignage(device, width, height, message):
     global livePassOffset, livePassLaps
 
     virtualViewport = viewport(device, width=width, height=height)
 
+    scroll_h = _layout.font_large_size
+    clock_h  = _layout.clock_height
+    y_scroll = max(0, (height - clock_h - scroll_h) // 2)
+
     lp_mode, lp_interval, lp_pps = _get_scroll_config('livePass', 'character', 0.05)
     lp_render = renderLivePassTextPixel(message, lp_pps / lp_interval) if lp_mode == 'pixel' else renderLivePassText(message)
-    rowScroll = snapshot(width, 20, lp_render, interval=lp_interval)
-    rowTime = snapshot(width, 14, renderTime, interval=1)
+    rowScroll = snapshot(width, scroll_h, lp_render, interval=lp_interval)
+    rowTime = snapshot(width, clock_h, renderTime, interval=1)
 
     if len(virtualViewport._hotspots) > 0:
         for hotspot, xy in virtualViewport._hotspots:
             virtualViewport.remove_hotspot(hotspot, xy)
 
-    virtualViewport.add_hotspot(rowScroll, (0, 15))
-    virtualViewport.add_hotspot(rowTime, (0, 50))
+    virtualViewport.add_hotspot(rowScroll, (0, y_scroll))
+    virtualViewport.add_hotspot(rowTime, (0, height - clock_h))
 
     return virtualViewport
 
@@ -321,6 +407,11 @@ def drawSignageWithLivePass(device, width, height, data, message):
 
     virtualViewport = viewport(device, width=width, height=height)
 
+    row_h    = _layout.font_size
+    pitch    = _layout.row_pitch
+    clock_h  = _layout.clock_height
+    scroll_h = _layout.font_large_size
+
     status = "Exp 00:00"
     callingAt = "Calling at:"
 
@@ -333,18 +424,18 @@ def drawSignageWithLivePass(device, width, height, data, message):
     w, h = _textsize(status, font)
     pw, ph = _textsize("At Plat 88", font)
 
-    rowOneA = snapshot(width - w - pw, 10, renderDestination(departures[0], fontBold), interval=10)
-    rowOneB = snapshot(w, 10, renderServiceStatus(departures[0]), interval=1)
-    rowOneC = snapshot(pw, 10, renderPlatform(departures[0]), interval=10)
+    rowOneA = snapshot(width - w - pw, row_h, renderDestination(departures[0], fontBold), interval=10)
+    rowOneB = snapshot(w, row_h, renderServiceStatus(departures[0]), interval=1)
+    rowOneC = snapshot(pw, row_h, renderPlatform(departures[0]), interval=10)
     cp_mode, cp_interval, cp_pps = _get_scroll_config('callingPoints', 'character', 0.1)
     lp_mode, lp_interval, lp_pps = _get_scroll_config('livePass', 'character', 0.05)
     stations_str = ", ".join(firstDepartureDestinations)
     cp_render = renderStationsPixel(stations_str, cp_pps / cp_interval) if cp_mode == 'pixel' else renderStations(stations_str)
     lp_render = renderLivePassTextPixel(message, lp_pps / lp_interval) if lp_mode == 'pixel' else renderLivePassText(message)
-    rowTwoA = snapshot(callingWidth, 10, renderCallingAt, interval=100)
-    rowTwoB = snapshot(width - callingWidth, 10, cp_render, interval=cp_interval)
-    rowLivePass = snapshot(width, 20, lp_render, interval=lp_interval)
-    rowTime = snapshot(width, 14, renderTime, interval=1)
+    rowTwoA = snapshot(callingWidth, row_h, renderCallingAt, interval=100)
+    rowTwoB = snapshot(width - callingWidth, row_h, cp_render, interval=cp_interval)
+    rowLivePass = snapshot(width, scroll_h, lp_render, interval=lp_interval)
+    rowTime = snapshot(width, clock_h, renderTime, interval=1)
 
     if len(virtualViewport._hotspots) > 0:
         for hotspot, xy in virtualViewport._hotspots:
@@ -353,10 +444,10 @@ def drawSignageWithLivePass(device, width, height, data, message):
     virtualViewport.add_hotspot(rowOneA, (0, 0))
     virtualViewport.add_hotspot(rowOneB, (width - w, 0))
     virtualViewport.add_hotspot(rowOneC, (width - w - pw, 0))
-    virtualViewport.add_hotspot(rowTwoA, (0, 12))
-    virtualViewport.add_hotspot(rowTwoB, (callingWidth, 12))
-    virtualViewport.add_hotspot(rowLivePass, (0, 27))
-    virtualViewport.add_hotspot(rowTime, (0, 50))
+    virtualViewport.add_hotspot(rowTwoA, (0, pitch))
+    virtualViewport.add_hotspot(rowTwoB, (callingWidth, pitch))
+    virtualViewport.add_hotspot(rowLivePass, (0, 2 * pitch))
+    virtualViewport.add_hotspot(rowTime, (0, height - clock_h))
 
     return virtualViewport
 
@@ -364,26 +455,30 @@ def drawSignageWithLivePass(device, width, height, data, message):
 def drawBlankSignage(device, width, height, departureStation):
     global stationRenderCount, pauseCount
 
+    row_h   = _layout.font_size
+    pitch   = _layout.row_pitch
+    clock_h = _layout.clock_height
+
     welcomeSize = _textsize("Welcome to", fontBold)
     stationSize = _textsize(departureStation, fontBold)
 
     virtualViewport = viewport(device, width=width, height=height)
 
-    rowOne = snapshot(width, 10, renderWelcomeTo(
+    rowOne = snapshot(width, row_h, renderWelcomeTo(
         (width - welcomeSize[0]) / 2), interval=10)
-    rowTwo = snapshot(width, 10, renderDepartureStation(
+    rowTwo = snapshot(width, row_h, renderDepartureStation(
         departureStation, (width - stationSize[0]) / 2), interval=10)
-    rowThree = snapshot(width, 10, renderDots, interval=10)
-    rowTime = snapshot(width, 14, renderTime, interval=1)
+    rowThree = snapshot(width, row_h, renderDots, interval=10)
+    rowTime = snapshot(width, clock_h, renderTime, interval=1)
 
     if len(virtualViewport._hotspots) > 0:
         for hotspot, xy in virtualViewport._hotspots:
             virtualViewport.remove_hotspot(hotspot, xy)
 
     virtualViewport.add_hotspot(rowOne, (0, 0))
-    virtualViewport.add_hotspot(rowTwo, (0, 12))
-    virtualViewport.add_hotspot(rowThree, (0, 24))
-    virtualViewport.add_hotspot(rowTime, (0, 50))
+    virtualViewport.add_hotspot(rowTwo, (0, pitch))
+    virtualViewport.add_hotspot(rowThree, (0, 2 * pitch))
+    virtualViewport.add_hotspot(rowTime, (0, height - clock_h))
 
     return virtualViewport
 
@@ -391,45 +486,20 @@ def drawBlankSignage(device, width, height, departureStation):
 def drawSignage(device, width, height, data):
     global stationRenderCount, pauseCount
 
-    virtualViewport = viewport(device, width=width, height=height)
+    layout  = _layout
+    row_h   = layout.font_size
+    pitch   = layout.row_pitch
+    clock_h = layout.clock_height
 
-    status = "Exp 00:00"
-    callingAt = "Calling at:"
+    virtualViewport = viewport(device, width=width, height=height)
+    vp_width = virtualViewport.width
 
     departures, firstDepartureDestinations, departureStation = data
 
-    w, h = _textsize(callingAt, font)
-    callingWidth = w
-    width = virtualViewport.width
+    status_w, _ = _textsize("Exp 00:00", font)
+    plat_w,   _ = _textsize("At Plat 88", font)
 
-    w, h = _textsize(status, font)
-    pw, ph = _textsize("At Plat 88", font)
-
-    rowOneA = snapshot(
-        width - w - pw, 10, renderDestination(departures[0], fontBold), interval=10)
-    rowOneB = snapshot(w, 10, renderServiceStatus(
-        departures[0]), interval=1)
-    rowOneC = snapshot(pw, 10, renderPlatform(departures[0]), interval=10)
-    cp_mode, cp_interval, cp_pps = _get_scroll_config('callingPoints', 'character', 0.1)
-    stations_str = ", ".join(firstDepartureDestinations)
-    cp_render = renderStationsPixel(stations_str, cp_pps / cp_interval) if cp_mode == 'pixel' else renderStations(stations_str)
-    rowTwoA = snapshot(callingWidth, 10, renderCallingAt, interval=100)
-    rowTwoB = snapshot(width - callingWidth, 10, cp_render, interval=cp_interval)
-    if(len(departures) > 1):
-        rowThreeA = snapshot(width - w - pw, 10, renderDestination(
-            departures[1],font), interval=10)
-        rowThreeB = snapshot(w, 10, renderServiceStatus(
-            departures[1]), interval=1)
-        rowThreeC = snapshot(pw, 10, renderPlatform(departures[1]), interval=10)
-
-    if(len(departures) > 2):
-        rowFourA = snapshot(width - w - pw, 10, renderDestination(
-            departures[2],font), interval=10)
-        rowFourB = snapshot(w, 10, renderServiceStatus(
-            departures[2]), interval=1)
-        rowFourC = snapshot(pw, 10, renderPlatform(departures[2]), interval=10)
-
-    rowTime = snapshot(width, 14, renderTime, interval=1)
+    num_trains = min(layout.num_trains, len(departures))
 
     if len(virtualViewport._hotspots) > 0:
         for hotspot, xy in virtualViewport._hotspots:
@@ -438,20 +508,62 @@ def drawSignage(device, width, height, data):
     stationRenderCount = 0
     pauseCount = 0
 
-    virtualViewport.add_hotspot(rowOneA, (0, 0))
-    virtualViewport.add_hotspot(rowOneB, (width - w, 0))
-    virtualViewport.add_hotspot(rowOneC, (width - w - pw, 0))
-    virtualViewport.add_hotspot(rowTwoA, (0, 12))
-    virtualViewport.add_hotspot(rowTwoB, (callingWidth, 12))
-    if(len(departures) > 1):
-        virtualViewport.add_hotspot(rowThreeA, (0, 24))
-        virtualViewport.add_hotspot(rowThreeB, (width - w, 24))
-        virtualViewport.add_hotspot(rowThreeC, (width - w - pw, 24))
-    if(len(departures) > 2):
-        virtualViewport.add_hotspot(rowFourA, (0, 36))
-        virtualViewport.add_hotspot(rowFourB, (width - w, 36))
-        virtualViewport.add_hotspot(rowFourC, (width - w - pw, 36))
-    virtualViewport.add_hotspot(rowTime, (0, 50))
+    # Clock flush to bottom
+    rowTime = snapshot(vp_width, clock_h, renderTime, interval=1)
+    virtualViewport.add_hotspot(rowTime, (0, height - clock_h))
+
+    if layout.wide_mode:
+        # Wide mode: standard columns in first NATIVE_W px; calling-at inline
+        # after that.  No dedicated calling-at row → equal pitch per train.
+        native_dest_w = NATIVE_W - status_w - plat_w
+
+        for i in range(num_trains):
+            y        = i * pitch
+            dep_font = fontBold if i == 0 else font
+
+            rowA = snapshot(native_dest_w, row_h,
+                            renderDestination(departures[i], dep_font), interval=10)
+            rowC = snapshot(plat_w, row_h,
+                            renderPlatform(departures[i]), interval=10)
+            rowB = snapshot(status_w, row_h,
+                            renderServiceStatus(departures[i]), interval=1)
+            virtualViewport.add_hotspot(rowA, (0, y))
+            virtualViewport.add_hotspot(rowC, (native_dest_w, y))
+            virtualViewport.add_hotspot(rowB, (native_dest_w + plat_w, y))
+
+            if layout.extra_col_width > 0:
+                calling = departures[i].get('_calling_at', [])
+                inline_text = ("→ " + ", ".join(calling)) if calling else ""
+                rowExtra = snapshot(layout.extra_col_width, row_h,
+                                    _render_static_text(inline_text), interval=100)
+                virtualViewport.add_hotspot(rowExtra, (NATIVE_W, y))
+    else:
+        # Standard / tall mode: calling-at row after train 0.
+        # Train 0 at y=0, calling-at at y=pitch, trains 1..N-1 at y=(i+1)*pitch.
+        calling_at_w, _ = _textsize("Calling at:", font)
+        cp_mode, cp_interval, cp_pps = _get_scroll_config('callingPoints', 'character', 0.1)
+        stations_str = ", ".join(firstDepartureDestinations)
+        cp_render = (renderStationsPixel(stations_str, cp_pps / cp_interval)
+                     if cp_mode == 'pixel' else renderStations(stations_str))
+        rowTwoA = snapshot(calling_at_w, row_h, renderCallingAt, interval=100)
+        rowTwoB = snapshot(vp_width - calling_at_w, row_h, cp_render, interval=cp_interval)
+        virtualViewport.add_hotspot(rowTwoA, (0, pitch))
+        virtualViewport.add_hotspot(rowTwoB, (calling_at_w, pitch))
+
+        for i in range(num_trains):
+            y        = 0 if i == 0 else (i + 1) * pitch
+            dep_font = fontBold if i == 0 else font
+            dest_w   = vp_width - status_w - plat_w
+
+            rowA = snapshot(dest_w, row_h,
+                            renderDestination(departures[i], dep_font), interval=10)
+            rowC = snapshot(plat_w, row_h,
+                            renderPlatform(departures[i]), interval=10)
+            rowB = snapshot(status_w, row_h,
+                            renderServiceStatus(departures[i]), interval=1)
+            virtualViewport.add_hotspot(rowA, (0, y))
+            virtualViewport.add_hotspot(rowC, (dest_w, y))
+            virtualViewport.add_hotspot(rowB, (dest_w + plat_w, y))
 
     return virtualViewport
 
@@ -490,9 +602,11 @@ def _draw_clock(draw, width, height):
     sec_str  = ":{}".format(second)
     w1, _ = _textsize(time_str, fontBoldLarge)
     w2, _ = _textsize(":00",    fontBoldTall)
-    x = (width - w1 - w2) / 2
-    draw.text((x,      50), text=time_str, font=fontBoldLarge, fill="yellow")
-    draw.text((x + w1, 55), text=sec_str,  font=fontBoldTall,  fill="yellow")
+    x       = (width - w1 - w2) / 2
+    y_clock = height - _layout.clock_height
+    y_sec   = y_clock + round(5 * _layout.font_scale)
+    draw.text((x,      y_clock), text=time_str, font=fontBoldLarge, fill="yellow")
+    draw.text((x + w1, y_sec),   text=sec_str,  font=fontBoldTall,  fill="yellow")
 
 
 def drawThreeRowSelector(device, width, height, items, idx, header=None):
@@ -522,14 +636,15 @@ def drawThreeRowSelector(device, width, height, items, idx, header=None):
     nxt  = (cur + 1) % n
     dim  = (160, 120, 0)
 
+    pitch = _layout.row_pitch
     row_y = 0
     if header:
         draw.text((0, row_y), text=header, font=fontBold, fill="yellow")
-        row_y = 12
+        row_y = pitch
 
-    draw.text((0, row_y),      text="< {}".format(items[prev]), font=font,     fill=dim)
-    draw.text((0, row_y + 12), text="> {}".format(items[cur]),  font=fontBold, fill="yellow")
-    draw.text((0, row_y + 24), text="  {}".format(items[nxt]),  font=font,     fill=dim)
+    draw.text((0, row_y),          text="< {}".format(items[prev]), font=font,     fill=dim)
+    draw.text((0, row_y + pitch),  text="> {}".format(items[cur]),  font=fontBold, fill="yellow")
+    draw.text((0, row_y + 2*pitch),text="  {}".format(items[nxt]),  font=font,     fill=dim)
     return img
 
 
@@ -538,7 +653,9 @@ def drawLoadingFrame(device, width, height, message="Loading..."):
     img  = Image.new("RGB", (width, height), (0, 0, 0))
     draw = ImageDraw.Draw(img)
     w, _ = _textsize(message, fontBold)
-    draw.text(((width - w) // 2, 24), text=message, font=fontBold, fill="yellow")
+    usable_h = height - _layout.clock_height
+    y_msg = max(0, (usable_h - _layout.font_size) // 2)
+    draw.text(((width - w) // 2, y_msg), text=message, font=fontBold, fill="yellow")
     _draw_clock(draw, width, height)
     return img
 
@@ -685,14 +802,14 @@ def _handle_encoder_event(ev):
 try:
     config = loadConfig()
 
-    device = create_output()
-    font = makeFont("Dot Matrix Regular.ttf", 10)
-    fontBold = makeFont("Dot Matrix Bold.ttf", 10)
-    fontBoldTall = makeFont("Dot Matrix Bold Tall.ttf", 10)
-    fontBoldLarge = makeFont("Dot Matrix Bold.ttf", 20)
+    widgetWidth, widgetHeight = _parse_display_sizes()[0]
+    _layout = _compute_layout(widgetWidth, widgetHeight)
 
-    widgetWidth = int(os.environ.get("DISPLAY_WIDTH", "256"))
-    widgetHeight = int(os.environ.get("DISPLAY_HEIGHT", "64"))
+    device = create_output()
+    font = _get_font("Dot Matrix Regular.ttf", _layout.font_size)
+    fontBold = _get_font("Dot Matrix Bold.ttf", _layout.font_size)
+    fontBoldTall = _get_font("Dot Matrix Bold Tall.ttf", _layout.font_size)
+    fontBoldLarge = _get_font("Dot Matrix Bold.ttf", _layout.font_large_size)
 
     stationRenderCount = 0
     pauseCount = 0
