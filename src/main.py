@@ -727,6 +727,27 @@ def _select_current_station():
     ui_state = UI_NORMAL
 
 
+# ── Background board data refresh ──────────────────────────────────────────────
+
+def _load_board_data_async():
+    """Fetch departure data in a background thread.
+
+    The periodic board refresh otherwise calls loadData*() synchronously from
+    the main render loop, which can block for up to the request timeout (10s)
+    if the upstream API is slow — freezing the display. Running it here and
+    handing the result to the main loop via board_data_queue keeps the 30fps
+    render loop unblocked regardless of API latency.
+    """
+    if config["apiMethod"] == 'describrr':
+        result = loadDataDescribrr(config["describrr"], config["journey"])
+    elif config["apiMethod"] == 'rtt':
+        result = loadDataRTT(config["rttApi"], config["journey"])
+    else:
+        result = loadData(config["transportApi"], config["journey"])
+    board_data_queue.put(result)
+    _refresh_in_flight.clear()
+
+
 # ── Background corridor preload ───────────────────────────────────────────────
 
 def _background_load_corridor(code):
@@ -834,6 +855,9 @@ try:
     live_pass_active = False
     refresh_event    = threading.Event()
 
+    board_data_queue   = queue.Queue()
+    _refresh_in_flight = threading.Event()
+
     # ── Encoder queue (ZMQ only; None in SPI mode) ────────────────────────
     encoder_queue = getattr(device, 'encoder_queue', None)
 
@@ -934,25 +958,28 @@ try:
                                               height=widgetHeight, data=data)
             else:
                 ws_triggered = config["apiMethod"] == 'describrr' and refresh_event.is_set()
-                if ws_triggered or timeNow - timeAtStart >= config["refreshTime"]:
+                if not _refresh_in_flight.is_set() and (
+                        ws_triggered or timeNow - timeAtStart >= config["refreshTime"]):
                     if ws_triggered:
                         refresh_event.clear()
                         logger.info("WebSocket event triggered board refresh")
-                    if config["apiMethod"] == 'describrr':
-                        data = loadDataDescribrr(config["describrr"], config["journey"])
-                    elif config["apiMethod"] == 'rtt':
-                        data = loadDataRTT(config["rttApi"], config["journey"])
-                    else:
-                        data = loadData(config["transportApi"], config["journey"])
+                    timeAtStart = time.time()
+                    _refresh_in_flight.set()
+                    threading.Thread(target=_load_board_data_async, daemon=True,
+                                      name="board-refresh").start()
 
+                try:
+                    new_data = board_data_queue.get_nowait()
+                except queue.Empty:
+                    new_data = None
+                if new_data is not None:
+                    data = new_data
                     if data[0] == False:
                         virtual = drawBlankSignage(
                             device, width=widgetWidth, height=widgetHeight, departureStation=data[2])
                     else:
                         virtual = drawSignage(device, width=widgetWidth,
                                               height=widgetHeight, data=data)
-
-                    timeAtStart = time.time()
 
         # ── Station scroll 2s timeout → auto-select ───────────────────────
         if ui_state == UI_STATION_SCROLL:
